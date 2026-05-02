@@ -9,6 +9,7 @@
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
 // ================= PIN =================
+// ========== for ESP32 C3 Mini ==========
 #define BUTTON_PIN 5
 #define BUZZER_PIN 4
 #define RELAY_PIN 3
