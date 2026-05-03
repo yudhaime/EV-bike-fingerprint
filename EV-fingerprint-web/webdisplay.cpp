@@ -74,7 +74,7 @@ window.onhashchange = function(){
 };
 
 // ================= HEADER =================
-function renderHeader(state, source, title="FOX-S"){
+function renderHeader(state, source, title="EV FINGERPRINT"){
   let color = (state === "ON") ? "#2ecc71" : "#e74c3c";
 
   return `
