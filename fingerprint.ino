@@ -9,7 +9,7 @@
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
 // ================= PIN =================
-// ========== for ESP32 C3 Mini ==========
+// ======= for ESP32 C3 Mini =============
 #define BUTTON_PIN 5
 #define BUZZER_PIN 4
 #define RELAY_PIN 3
@@ -28,6 +28,7 @@ bool scanning = false;
 bool isSleep = false;
 bool isEnrolling = false;
 bool isDeleting = false;
+bool sensorError = false;
 
 // ================= DEBOUNCE =================
 bool touchState = false;
@@ -73,6 +74,7 @@ uint16_t calculateChecksum(uint8_t *cmd, int len) {
   return sum;
 }
 
+// ==== matikan lampu fingerprint saat sleep =====
 void ledOff() {
   uint8_t cmd[] = {
     0xEF, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0x01,
@@ -82,7 +84,7 @@ void ledOff() {
   cmd[14] = (sum >> 8) & 0xFF;
   cmd[15] = sum & 0xFF;
   mySerial.write(cmd, sizeof(cmd));
-}
+} 
 
 // ================= OLED =================
 void showStatus(String mainText, String subText = "") {
@@ -121,6 +123,10 @@ String relayText() {
 }
 
 void showReady() {
+  if (sensorError) {
+    showStatus("ERROR", "Check sensor");
+    return;
+  }
   oledOn();
   showStatus("READY", relayText());
 }
@@ -152,6 +158,15 @@ void beepDeleteSuccess() {
   beep(100);
   delay(100);
   beep(100);
+}
+
+void beepError() {
+  // BEEP ERROR: 3 beep pendek
+  beep(50);
+  delay(50);
+  beep(50);
+  delay(50);
+  beep(50);
 }
 
 // ================= RELAY =================
@@ -195,7 +210,6 @@ void startDeleteMode() {
   isDeleting = true;
   deleteStep = 0;
   
-  // Dapatkan daftar ID yang tersimpan
   getAvailableIDs();
   
   if (availableCount == 0) {
@@ -207,7 +221,6 @@ void startDeleteMode() {
     return;
   }
   
-  // Mulai dari ID pertama
   selectedID = 0;
   showStatus("SELECT ID", "Touch to choose");
   delay(1000);
@@ -218,7 +231,6 @@ void showDeleteSelection() {
   if (selectedID < availableCount) {
     showStatus("ID: " + String(availableIDs[selectedID]), "Touch=Select");
   } else {
-    // Selesai, keluar dari mode delete
     isDeleting = false;
     showReady();
   }
@@ -227,7 +239,6 @@ void showDeleteSelection() {
 void selectNextID() {
   selectedID++;
   if (selectedID >= availableCount) {
-    // Selesai memilih semua
     isDeleting = false;
     showStatus("DONE", "Delete mode exit");
     delay(1000);
@@ -241,12 +252,10 @@ void confirmDelete() {
   if (selectedID < availableCount) {
     int idToDelete = availableIDs[selectedID];
     deleteFingerprintByID(idToDelete);
-    // Hapus dari daftar
     for (int i = selectedID; i < availableCount - 1; i++) {
       availableIDs[i] = availableIDs[i + 1];
     }
     availableCount--;
-    // Jangan increment selectedID karena data sudah bergeser
     if (availableCount == 0) {
       isDeleting = false;
       showStatus("ALL DELETED");
@@ -259,11 +268,22 @@ void confirmDelete() {
 }
 
 // ================= REINIT FINGERPRINT =================
-void reinitFingerprint() {
+bool reinitFingerprint() {
   while (mySerial.available()) {
     mySerial.read();
   }
-  finger.verifyPassword();
+  
+  // Coba verify dengan retry
+  for (int attempt = 0; attempt < 3; attempt++) {
+    if (finger.verifyPassword()) {
+      sensorError = false;
+      return true;
+    }
+    delay(100);
+  }
+  
+  sensorError = true;
+  return false;
 }
 
 // ================= FINGERPRINT ENROLL =================
@@ -278,6 +298,14 @@ int getFreeID() {
 }
 
 void enrollFingerprint() {
+  if (sensorError) {
+    showStatus("SENSOR ERR");
+    beepFail();
+    delay(1000);
+    showReady();
+    return;
+  }
+  
   if (isEnrolling || scanning || isDeleting) {
     showStatus("BUSY");
     beepFail();
@@ -402,6 +430,14 @@ void processEnroll() {
 
 // ================= SCAN FINGERPRINT =================
 void scanFingerprint() {
+  if (sensorError) {
+    showStatus("SENSOR ERR");
+    beepFail();
+    delay(500);
+    showReady();
+    return;
+  }
+  
   if (millis() - lastScanTime < scanCooldown) return;
   if (scanning || isEnrolling || isDeleting) return;
   
@@ -467,9 +503,31 @@ void wakeUp() {
   
   isSleep = false;
   oledOn();
-  showReady();
+  showStatus("WAKE");
+  delay(100);
   reinitFingerprint();
+  showReady();
   lastActivity = millis();
+}
+
+// ================= INIT FINGERPRINT WITH RETRY =================
+bool initFingerprint() {
+  // Beri waktu sensor stabil
+  delay(500);
+  
+  // Flush serial buffer
+  while (mySerial.available()) {
+    mySerial.read();
+  }
+  
+  // Coba koneksi dengan retry
+  for (int attempt = 0; attempt < 5; attempt++) {
+    if (finger.verifyPassword()) {
+      return true;
+    }
+    delay(200);
+  }
+  return false;
 }
 
 // ================= SETUP =================
@@ -483,25 +541,35 @@ void setup() {
   digitalWrite(RELAY_PIN, LOW);
   relayState = false;
   
+  // Inisialisasi OLED
   Wire.begin(6, 8);
   display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
   display.clearDisplay();
+  showStatus("STARTING");
   
+  // Inisialisasi UART Fingerprint
   mySerial.begin(57600, SERIAL_8N1, RX_PIN, TX_PIN);
   finger.begin(57600);
   
-  if (!finger.verifyPassword()) {
-    oledOn();
-    showStatus("ERROR");
-    while (1) {
-      digitalWrite(BUZZER_PIN, HIGH);
-      delay(200);
-      digitalWrite(BUZZER_PIN, LOW);
+  // Coba koneksi ke sensor
+  if (initFingerprint()) {
+    sensorError = false;
+    showStatus("OK");
+    beepSuccess();
+    delay(500);
+    showReady();
+  } else {
+    sensorError = true;
+    showStatus("SENSOR ERR");
+    // BEEP ERROR: 3 kali, tapi tidak infinite loop
+    for (int i = 0; i < 3; i++) {
+      beepError();
       delay(200);
     }
+    // Tetap lanjut ke ready meskipun error (tidak infinite loop)
+    showStatus("ERROR", "Check wiring");
   }
   
-  showReady();
   lastActivity = millis();
 }
 
@@ -526,7 +594,6 @@ void loop() {
   
   // Handle delete mode
   if (isDeleting) {
-    // Touch sensor untuk pilih/konfirmasi
     bool reading = digitalRead(TOUCH_PIN);
     if (reading != lastTouchState) {
       lastTouchChange = millis();
@@ -536,26 +603,25 @@ void loop() {
       if (reading != touchState) {
         touchState = reading;
         if (touchState == HIGH) {
-          confirmDelete();  // Touch = hapus ID yang dipilih
+          confirmDelete();
           lastActivity = millis();
         }
       }
     }
     lastTouchState = reading;
     
-    // Button untuk next ID
     bool buttonReading = digitalRead(BUTTON_PIN);
     if (buttonReading == LOW && lastButtonState == HIGH) {
-      selectNextID();  // Tekan button = skip/next ID
+      selectNextID();
       lastActivity = millis();
-      delay(200);  // Debounce
+      delay(200);
     }
     lastButtonState = buttonReading;
     
     return;
   }
   
-  // Button handling (short press = enroll, long press = delete mode)
+  // Button handling
   bool buttonReading = digitalRead(BUTTON_PIN);
   
   if (buttonReading == LOW && lastButtonState == HIGH) {
@@ -568,23 +634,34 @@ void loop() {
     unsigned long pressDuration = millis() - buttonPressTime;
     buttonPressed = false;
     
-    if (pressDuration >= 5000) {
-      // Long press 5+ detik = mode delete
+    if (pressDuration >= 5000 && !sensorError) {
       startDeleteMode();
-    } else if (pressDuration >= 100) {
-      // Short press = enroll
+    } else if (pressDuration >= 100 && !sensorError) {
       enrollFingerprint();
+      lastActivity = millis();
+    } else if (pressDuration >= 100 && sensorError) {
+      // Jika error, coba reinit
+      showStatus("RETRY");
+      if (initFingerprint()) {
+        sensorError = false;
+        beepSuccess();
+        showReady();
+      } else {
+        beepFail();
+      }
       lastActivity = millis();
     }
   }
   
   lastButtonState = buttonReading;
   
-  // Update display selama button ditahan
-  if (buttonPressed && (millis() - buttonPressTime) > 5000) {
-    showStatus("DELETE MODE", "Release now");
-  } else if (buttonPressed && (millis() - buttonPressTime) > 3000) {
-    showStatus("HOLD", "2s more...");
+  // Update display saat button ditahan
+  if (buttonPressed && !sensorError) {
+    if ((millis() - buttonPressTime) > 5000) {
+      showStatus("DELETE MODE", "Release now");
+    } else if ((millis() - buttonPressTime) > 3000) {
+      showStatus("HOLD", "2s more...");
+    }
   }
   
   // Touch sensor scan (normal mode)
@@ -596,8 +673,14 @@ void loop() {
   if ((millis() - lastTouchChange) > debounceDelay) {
     if (reading != touchState) {
       touchState = reading;
-      if (touchState == HIGH) {
+      if (touchState == HIGH && !sensorError) {
         scanFingerprint();
+        lastActivity = millis();
+      } else if (touchState == HIGH && sensorError) {
+        showStatus("SENSOR ERR");
+        beepFail();
+        delay(300);
+        showReady();
         lastActivity = millis();
       }
     }
