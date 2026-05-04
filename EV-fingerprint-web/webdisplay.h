@@ -3,6 +3,6 @@
 
 #include <Arduino.h>
 
-String getWebPage();
+const char* getWebPage();
 
 #endif
