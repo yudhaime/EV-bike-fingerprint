@@ -6,6 +6,10 @@
 #include "config.h"
 #include "webdisplay.h"
 
+// ================= RESET WIFI BUTTON =================
+unsigned long lastResetWifiTime = 0;
+bool resetWifiTriggered = false;
+
 // ================= SERIAL =================
 HardwareSerial mySerial(1);
 Adafruit_Fingerprint finger = Adafruit_Fingerprint(&mySerial);
@@ -15,8 +19,17 @@ WebServer server(80);
 
 // ================= STORAGE =================
 Preferences prefs;
-String fingerNames[128];
-bool idUsed[128];
+String fingerNames[MAX_FINGERPRINT_ID + 1];
+bool idUsed[MAX_FINGERPRINT_ID + 1];
+
+// ================= WIFI STORAGE =================
+String wifiSsid = "";
+String wifiPass = "";
+
+// ================= WIFI POWER SAVING =================
+bool wifiEnabled = true;
+bool pernahAdaClient = false;
+unsigned long bootTime = 0;
 
 // ================= STATE =================
 bool relayState = false;
@@ -28,15 +41,12 @@ bool isSleep = false;
 unsigned long lastActivity = 0;
 
 // ================= TOUCH =================
-bool touchState = false;
 bool lastTouchState = false;
-unsigned long lastTouchChange = 0;
 
 // ================= ENROLL =================
 enum EnrollState {
   ENROLL_IDLE,
   ENROLL_WAIT_FINGER,
-  ENROLL_IMAGE1,
   ENROLL_REMOVE,
   ENROLL_IMAGE2,
   ENROLL_STORE
@@ -48,11 +58,123 @@ String enrollResult = "IDLE";
 int enrollID = -1;
 unsigned long enrollTimer = 0;
 
-// ================= BUZZER =================
+// ================= CEK SENSOR FINGERPRINT =================
+bool sensorError = false;
+
+void beepError(){
+  digitalWrite(BUZZER_PIN, HIGH);
+  delay(300);
+  digitalWrite(BUZZER_PIN, LOW);
+  delay(100);
+  digitalWrite(BUZZER_PIN, HIGH);
+  delay(80);
+  digitalWrite(BUZZER_PIN, LOW);
+  delay(80);
+  digitalWrite(BUZZER_PIN, HIGH);
+  delay(80);
+  digitalWrite(BUZZER_PIN, LOW);
+}
+
+void resetSensorErrorFlag(){
+  sensorError = false;
+}
+
+bool cekSensorFingerprint(){
+  if(!finger.verifyPassword()){
+    if(!sensorError){
+      sensorError = true;
+      for(int i=0;i<3;i++){
+        beepError();
+        delay(200);
+      }
+    }
+    return false;
+  }
+  
+  if(sensorError){
+    sensorError = false;
+    beep(50);
+    delay(100);
+    beep(50);
+  }
+  return true;
+}
+
 void beep(int d){
   digitalWrite(BUZZER_PIN, HIGH);
   delay(d);
   digitalWrite(BUZZER_PIN, LOW);
+}
+
+// ================= RESET WIFI =================
+void resetWifiToDefault(){
+  if(wifiEnabled){
+    wifiEnabled = false;
+    server.stop();
+    WiFi.softAPdisconnect(true);
+    WiFi.mode(WIFI_OFF);
+  }
+  
+  delay(100);
+  
+  prefs.remove("wifi_ssid");
+  prefs.remove("wifi_pass");
+  
+  wifiSsid = String(DEFAULT_WIFI_SSID);
+  wifiPass = String(DEFAULT_WIFI_PASS);
+  
+  prefs.putString("wifi_ssid", wifiSsid);
+  prefs.putString("wifi_pass", wifiPass);
+  
+  beep(200);
+  delay(200);
+  beep(200);
+  delay(200);
+  beep(200);
+  
+  delay(500);
+  ESP.restart();
+}
+
+void cekResetWifiButton(){
+  static unsigned long pressStartTime = 0;
+  static bool buttonPressed = false;
+  static bool beep1Done = false;
+  static bool beep2Done = false;
+  
+  bool buttonState = digitalRead(RESET_WIFI_PIN);
+  
+  if(buttonState == LOW){
+    if(!buttonPressed){
+      buttonPressed = true;
+      pressStartTime = millis();
+      beep1Done = false;
+      beep2Done = false;
+      beep(50);
+    }
+    else {
+      unsigned long pressDuration = millis() - pressStartTime;
+      
+      if(pressDuration >= 1000 && !beep1Done){
+        beep1Done = true;
+        beep(80);
+      }
+      
+      if(pressDuration >= 2000 && !beep2Done){
+        beep2Done = true;
+        beep(80);
+      }
+      
+      if(pressDuration >= 3000 && !resetWifiTriggered){
+        resetWifiTriggered = true;
+        resetWifiToDefault();
+      }
+    }
+  }
+  else {
+    buttonPressed = false;
+    resetWifiTriggered = false;
+  }
 }
 
 // ================= RELAY =================
@@ -66,21 +188,73 @@ void toggleRelay(){
   setRelay(!relayState);
 }
 
-// ================= LOAD =================
+// ================= LOAD NAMES =================
 void loadNames(){
   for(int i=1;i<=MAX_FINGERPRINT_ID;i++){
     fingerNames[i] = prefs.getString(("id_"+String(i)).c_str(), "");
     idUsed[i] = prefs.getBool(("used_"+String(i)).c_str(), false);
+    
+    if(!idUsed[i]){
+      fingerNames[i] = "";
+    }
   }
 }
 
-// ================= COUNT =================
-int getUsedCount(){
-  int c=0;
-  for(int i=1;i<=MAX_FINGERPRINT_ID;i++){
-    if(idUsed[i]) c++;
+// ================= LOAD WIFI =================
+void loadWifiCredentials(){
+  wifiSsid = prefs.getString("wifi_ssid", DEFAULT_WIFI_SSID);
+  wifiPass = prefs.getString("wifi_pass", DEFAULT_WIFI_PASS);
+}
+
+void saveWifiCredentials(String ssid, String pass){
+  prefs.putString("wifi_ssid", ssid);
+  prefs.putString("wifi_pass", pass);
+  wifiSsid = ssid;
+  wifiPass = pass;
+}
+
+// ================= SETUP WIFI =================
+void setupWiFi(){
+  WiFi.mode(WIFI_OFF);
+  delay(100);
+  WiFi.mode(WIFI_AP);
+  delay(100);
+  
+  // Coba dengan SSID yang sudah dibersihkan
+  String cleanSSID = wifiSsid;
+  cleanSSID.replace(" ", "");
+  cleanSSID.replace(":", "");
+  cleanSSID.replace(";", "");
+  
+  bool success = WiFi.softAP(cleanSSID.c_str(), wifiPass.c_str());
+  
+  if(!success){
+    // Fallback terakhir
+    WiFi.softAP("ESP-AP", "12345678");
   }
-  return c;
+}
+
+// ================= MATIKAN WIFI =================
+void matikanWifi(){
+  if(!wifiEnabled) return;
+  
+  wifiEnabled = false;
+  server.stop();
+  WiFi.softAPdisconnect(true);
+  WiFi.mode(WIFI_OFF);
+}
+
+// ================= CEK WIFI POWER SAVING =================
+void cekWifiPowerSaving(){
+  if(!wifiEnabled) return;
+  if(pernahAdaClient) return;
+  if(WiFi.softAPgetStationNum() > 0){
+    pernahAdaClient = true;
+    return;
+  }
+  if(millis() - bootTime > WIFI_TIMEOUT_MS){
+    matikanWifi();
+  }
 }
 
 // ================= SAFE ID =================
@@ -137,6 +311,7 @@ void processEnroll(){
     enrollMessage = "TIMEOUT";
     enrollResult = "FAIL";
     enrollState = ENROLL_IDLE;
+    resetSensorErrorFlag();
     return;
   }
 
@@ -179,6 +354,8 @@ void processEnroll(){
         beep(80);
         delay(120);
         beep(80);
+        
+        resetSensorErrorFlag();
 
       } else {
 
@@ -189,6 +366,8 @@ void processEnroll(){
           beep(50);
           delay(60);
         }
+        
+        resetSensorErrorFlag();
       }
 
       enrollState = ENROLL_IDLE;
@@ -232,45 +411,46 @@ void wakeUp(){
 
 // ================= FAST WAKE =================
 void handleSleep(){
-
   if(isSleep){
-
     static unsigned long wakeTimer = 0;
-
     if(digitalRead(TOUCH_PIN) == HIGH){
-
       if(wakeTimer == 0) wakeTimer = millis();
-
       if(millis() - wakeTimer > 25){
         wakeUp();
         wakeTimer = 0;
       }
-
     } else {
       wakeTimer = 0;
     }
-
     return;
   }
 }
 
-// ================= WEB =================
-void handleRoot(){ server.send(200,"text/html",getWebPage()); }
+// ================= WEB HANDLERS =================
+void handleRoot(){ 
+  if(!wifiEnabled) return;
+  server.send(200,"text/html",getWebPage()); 
+}
 
 void handleRelay(){
+  if(!wifiEnabled) return;
   toggleRelay();
+  lastTrigger = "by web";
   server.send(200,"text/plain","OK");
 }
 
-// 🔥 STATUS (INI YANG DIPAKAI WEB SYNC)
 void handleStatus(){
+  if(!wifiEnabled) return;
   String json = "{\"state\":\"" + String(relayState?"ON":"OFF") +
                 "\",\"source\":\"" + lastTrigger + "\"}";
   server.send(200,"application/json",json);
 }
 
 void handleEnroll(){
-
+  if(!wifiEnabled) return;
+  
+  resetSensorErrorFlag();
+  
   if(isSleep) wakeUp();
 
   int id = getSafeFreeID();
@@ -284,7 +464,7 @@ void handleEnroll(){
 
   enrollID = id;
   enrollState = ENROLL_WAIT_FINGER;
-  enrollMessage = "ID: " + String(enrollID);
+  enrollMessage = "Tempelkan jari ke sensor - ID: " + String(enrollID);
   enrollResult = "PROCESS";
   enrollTimer = millis();
 
@@ -297,53 +477,78 @@ void handleEnroll(){
 }
 
 void handleEnrollStatus(){
+  if(!wifiEnabled) return;
   String json = "{\"msg\":\"" + enrollMessage +
                 "\",\"result\":\"" + enrollResult + "\"}";
   server.send(200,"application/json",json);
 }
 
 void handleDelete(){
+  if(!wifiEnabled) return;
   int id = server.arg("id").toInt();
   finger.deleteModel(id);
   idUsed[id] = false;
   prefs.putBool(("used_"+String(id)).c_str(), false);
+  prefs.remove(("id_"+String(id)).c_str());
+  fingerNames[id] = "";
   server.send(200,"text/plain","OK");
 }
 
 void handleDeleteAll(){
+  if(!wifiEnabled) return;
   for(int i=1;i<=MAX_FINGERPRINT_ID;i++){
     finger.deleteModel(i);
     idUsed[i] = false;
     prefs.putBool(("used_"+String(i)).c_str(), false);
+    prefs.remove(("id_"+String(i)).c_str());
+    fingerNames[i] = "";
   }
   server.send(200,"text/plain","OK");
 }
 
 void handleList(){
+  if(!wifiEnabled) return;
   String json = "[";
   bool first = true;
-
   for(int i=1;i<=MAX_FINGERPRINT_ID;i++){
     if(idUsed[i]){
       if(!first) json += ",";
       first = false;
-
       json += "{\"id\":" + String(i) + ",\"name\":\"" + fingerNames[i] + "\"}";
     }
   }
-
   json += "]";
   server.send(200,"application/json",json);
 }
 
 void handleSetName(){
+  if(!wifiEnabled) return;
   int id = server.arg("id").toInt();
   String name = server.arg("name");
-
   fingerNames[id] = name;
   prefs.putString(("id_"+String(id)).c_str(), name);
-
   server.send(200,"text/plain","OK");
+}
+
+void handleGetWifi(){
+  if(!wifiEnabled) return;
+  String json = "{\"ssid\":\"" + wifiSsid + "\"}";
+  server.send(200,"application/json",json);
+}
+
+void handleSetWifi(){
+  if(!wifiEnabled) return;
+  String ssid = server.arg("ssid");
+  String pass = server.arg("pass");
+  
+  if(ssid.length() > 0){
+    saveWifiCredentials(ssid, pass);
+    server.send(200,"text/plain","OK");
+    delay(1000);
+    ESP.restart();
+  } else {
+    server.send(400,"text/plain","SSID cannot be empty");
+  }
 }
 
 // ================= SETUP =================
@@ -351,14 +556,26 @@ void setup(){
   pinMode(BUZZER_PIN, OUTPUT);
   pinMode(RELAY_PIN, OUTPUT);
   pinMode(TOUCH_PIN, INPUT);
+  pinMode(RESET_WIFI_PIN, INPUT_PULLUP);
 
   prefs.begin("fingerDB", false);
   loadNames();
+  loadWifiCredentials();
 
   mySerial.begin(SERIAL_BAUD, SERIAL_8N1, RX_PIN, TX_PIN);
   finger.begin(SERIAL_BAUD);
+  delay(100);
+  
+  finger.verifyPassword();
 
-  WiFi.softAP(WIFI_SSID, WIFI_PASS);
+  setupWiFi();
+  
+  // Indikasi setup selesai dengan beep
+  beep(100);
+  delay(100);
+  beep(100);
+  
+  bootTime = millis();
 
   server.on("/",handleRoot);
   server.on("/relay",handleRelay);
@@ -369,6 +586,8 @@ void setup(){
   server.on("/deleteAll",handleDeleteAll);
   server.on("/list",handleList);
   server.on("/setname",handleSetName);
+  server.on("/getWifi",handleGetWifi);
+  server.on("/setWifi",handleSetWifi);
 
   server.begin();
 
@@ -377,7 +596,12 @@ void setup(){
 
 // ================= LOOP =================
 void loop(){
-  server.handleClient();
+  cekResetWifiButton();
+  
+  if(wifiEnabled){
+    server.handleClient();
+    cekWifiPowerSaving();
+  }
 
   handleSleep();
 
