@@ -74,7 +74,7 @@ Jika kode ini membantu mungkin sedikit donasi akan sangat saya hargai
 
 | Pin ZW101 | Fungsi | Koneksi ke ESP32-C3 | Keterangan |
 |-----------|--------|---------------------|-------------|
-| V_Touch | Kontrol power sensor | GPIO 2 (opsional) | HIGH = hidup, LOW = mati |
+| V_Touch | Kontrol power sensor | 3.3v | |
 | TOUCH_OUT | Deteksi sentuhan jari | GPIO 7 | bisa untuk tombol atau untuk wake jika sleep |
 | VCC | Power 3.3V | 3.3V | Jangan pakai 5V, bisa rusak |
 | TX | Kirim data ke ESP32 | GPIO 20 (RX) | Pin RX dari ESP32 |
