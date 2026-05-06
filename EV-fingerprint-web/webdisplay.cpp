@@ -264,6 +264,19 @@ async function syncHeader(){
   }
 }
 
+// ================= MATIKAN WIFI =================
+async function turnOffWifi(){
+  if(confirm("Peringatan!\n\nMemerintahkan modul untuk mematikan Wi-Fi.\n\nModul akan tetap berjalan normal (scan fingerprint tetap berfungsi).\n\nUntuk mengaktifkan Wi-Fi kembali, tekan tombol fisik pada modul selama 5 detik.\n\nLanjutkan?")){
+    let res = await fetch("/wifi/off");
+    if(res.ok){
+      alert("Wi-Fi dimatikan. Modul akan tetap berjalan.\n\nTekan tombol fisik 5 detik untuk mengaktifkan kembali.");
+      location.reload();
+    } else {
+      alert("Gagal mematikan Wi-Fi");
+    }
+  }
+}
+
 async function loadHome(){
   await updateStatus();
   
@@ -276,7 +289,10 @@ async function loadHome(){
         <button class="button gray" onclick="route('manage')">Kelola</button>
       </div>
       <h2>Pengaturan Sistem</h2>
-      <button class="button orange" onclick="route('wifi')">Setting WiFi</button>
+      <div class="grid">
+        <button class="button orange" onclick="route('wifi')">Setting WiFi</button>
+        <button class="button red" onclick="turnOffWifi()">Matikan Wi-Fi</button>
+      </div>
     </div>
   `;
 }
