@@ -30,6 +30,13 @@ Jika kode ini membantu mungkin sedikit donasi akan sangat saya hargai
 | Touch Sensor / Button | GPIO 7 | Trigger scan fingerprint |
 | Toggle Button | GPIO 5 (to GND) | Toggle WiFi ON/OFF (tahan 3 detik) |
 
+## Other Requirements
+
+- Stepdown 90v ke 5v untuk menghidupkan ESP32
+- Solid State Relay SSR DD pastikan DD (DC-DC) bukan DA (DC-AC)
+- Saklar
+- Kabel, Solder, Timah dll
+
 ## Software Requirements
 
 - Arduino IDE (atau PlatformIO)
@@ -90,6 +97,17 @@ Buka file `config.h` dan sesuaikan:
 // true = sensor ikut sleep (hemat daya), false = sensor tetap menyala
 #define ENABLE_SENSOR_SLEEP false
 ```
+
+## Cara Pasang ke Kendaraan 
+
+- Kunci Kontak pada dasarnya terhubung ke batre dan controller untuk menyalurkan +72v ke Controller bisanya berwarna kuning dan merah
+- Ambil +72v pasangkan ke positif Step Down/Reducer (Kabel Warna merah ada sekring untuk membedakan)
+- Untuk -72v ke reducer cari dari gnd atau jika di kendaraan Polytron Fox R/S ambil dari modul charger USB (warna kabel Hijau)
+- Output +5v Pasangkan ke pin 5v dan -5v ke gnd pada esp32
+- Pasangkan gnd ke input (-) SSR lalu GPIO3 ke (+) SSR
+- Cabangkan +72v ke (+) output SSR
+- Untuk output (-) SSR pasangkan ke kabel menuju controller (biasanya kabel kuning dari kabel stop kontak)
+- Output (+) dan (-) SSR boleh dicabang ke saklar kunci kontak jika masih ingin menggunakan kunci kontak fisik
 
 ## Cara Penggunaan
 
