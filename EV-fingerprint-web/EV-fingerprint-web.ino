@@ -6,9 +6,9 @@
 #include "config.h"
 #include "webdisplay.h"
 
-// ================= RESET WIFI BUTTON =================
-unsigned long lastResetWifiTime = 0;
-bool resetWifiTriggered = false;
+// ================= WIFI TOGGLE BUTTON =================
+unsigned long lastToggleTime = 0;
+bool toggleTriggered = false;
 
 // ================= SERIAL =================
 HardwareSerial mySerial(1);
@@ -25,11 +25,8 @@ bool idUsed[MAX_FINGERPRINT_ID + 1];
 // ================= WIFI STORAGE =================
 String wifiSsid = "";
 String wifiPass = "";
-
-// ================= WIFI POWER SAVING =================
-bool wifiEnabled = true;
-bool pernahAdaClient = false;
-unsigned long bootTime = 0;
+bool wifiEnabled = false;           // Default MATI setelah booting
+bool wifiAutoOnAfterRestart = false; // Flag untuk restart karena ganti WiFi
 
 // ================= STATE =================
 bool relayState = false;
@@ -106,43 +103,29 @@ void beep(int d){
   digitalWrite(BUZZER_PIN, LOW);
 }
 
-// ================= RESET WIFI =================
-void resetWifiToDefault(){
+// ================= TOGGLE WIFI =================
+void toggleWiFi(){
   if(wifiEnabled){
+    // Matikan WiFi
     wifiEnabled = false;
     server.stop();
     WiFi.softAPdisconnect(true);
     WiFi.mode(WIFI_OFF);
+  } else {
+    // Nyalakan WiFi
+    wifiEnabled = true;
+    setupWiFi();
+    server.begin();
   }
-  
-  delay(100);
-  
-  prefs.remove("wifi_ssid");
-  prefs.remove("wifi_pass");
-  
-  wifiSsid = String(DEFAULT_WIFI_SSID);
-  wifiPass = String(DEFAULT_WIFI_PASS);
-  
-  prefs.putString("wifi_ssid", wifiSsid);
-  prefs.putString("wifi_pass", wifiPass);
-  
-  beep(200);
-  delay(200);
-  beep(200);
-  delay(200);
-  beep(200);
-  
-  delay(500);
-  ESP.restart();
 }
 
-void cekResetWifiButton(){
+void cekWifiToggleButton(){
   static unsigned long pressStartTime = 0;
   static bool buttonPressed = false;
   static bool beep1Done = false;
   static bool beep2Done = false;
   
-  bool buttonState = digitalRead(RESET_WIFI_PIN);
+  bool buttonState = digitalRead(WIFI_TOGGLE_PIN);
   
   if(buttonState == LOW){
     if(!buttonPressed){
@@ -150,7 +133,6 @@ void cekResetWifiButton(){
       pressStartTime = millis();
       beep1Done = false;
       beep2Done = false;
-      beep(50);
     }
     else {
       unsigned long pressDuration = millis() - pressStartTime;
@@ -165,15 +147,16 @@ void cekResetWifiButton(){
         beep(80);
       }
       
-      if(pressDuration >= 3000 && !resetWifiTriggered){
-        resetWifiTriggered = true;
-        resetWifiToDefault();
+      if(pressDuration >= 3000 && !toggleTriggered){
+        toggleTriggered = true;
+        beep(1000);  // Beep panjang 1 detik sebagai konfirmasi
+        toggleWiFi();
       }
     }
   }
   else {
     buttonPressed = false;
-    resetWifiTriggered = false;
+    toggleTriggered = false;
   }
 }
 
@@ -204,6 +187,7 @@ void loadNames(){
 void loadWifiCredentials(){
   wifiSsid = prefs.getString("wifi_ssid", DEFAULT_WIFI_SSID);
   wifiPass = prefs.getString("wifi_pass", DEFAULT_WIFI_PASS);
+  wifiAutoOnAfterRestart = prefs.getBool("wifi_auto_on", false);
 }
 
 void saveWifiCredentials(String ssid, String pass){
@@ -220,40 +204,21 @@ void setupWiFi(){
   WiFi.mode(WIFI_AP);
   delay(100);
   
-  // Coba dengan SSID yang sudah dibersihkan
   String cleanSSID = wifiSsid;
   cleanSSID.replace(" ", "");
   cleanSSID.replace(":", "");
   cleanSSID.replace(";", "");
   
-  bool success = WiFi.softAP(cleanSSID.c_str(), wifiPass.c_str());
-  
-  if(!success){
-    // Fallback terakhir
-    WiFi.softAP("ESP-AP", "12345678");
-  }
+  WiFi.softAP(cleanSSID.c_str(), wifiPass.c_str());
 }
 
-// ================= MATIKAN WIFI =================
-void matikanWifi(){
-  if(!wifiEnabled) return;
-  
-  wifiEnabled = false;
-  server.stop();
-  WiFi.softAPdisconnect(true);
-  WiFi.mode(WIFI_OFF);
-}
-
-// ================= CEK WIFI POWER SAVING =================
-void cekWifiPowerSaving(){
-  if(!wifiEnabled) return;
-  if(pernahAdaClient) return;
-  if(WiFi.softAPgetStationNum() > 0){
-    pernahAdaClient = true;
-    return;
-  }
-  if(millis() - bootTime > WIFI_TIMEOUT_MS){
-    matikanWifi();
+// ================= WAKEUP SENSOR =================
+void wakeupSensor(){
+  if(ENABLE_SENSOR_SLEEP){
+    mySerial.write(0x55);
+    delay(100);
+    finger.verifyPassword();
+    delay(50);
   }
 }
 
@@ -274,6 +239,8 @@ void scanFingerprint(){
   if(isSleep || enrollState != ENROLL_IDLE || scanning) return;
 
   scanning = true;
+
+  wakeupSensor();
 
   int p;
   unsigned long t = millis();
@@ -318,6 +285,8 @@ void processEnroll(){
   switch(enrollState){
 
     case ENROLL_WAIT_FINGER:
+      wakeupSensor();
+      
       if(finger.getImage() == FINGERPRINT_OK){
         if(finger.image2Tz(1) == FINGERPRINT_OK){
           enrollMessage = "LEPAS JARI";
@@ -397,7 +366,11 @@ void goSleep(){
   if(isSleep || scanning || enrollState != ENROLL_IDLE) return;
 
   isSleep = true;
-  ledOff();
+  
+  if(ENABLE_SENSOR_SLEEP){
+    ledOff();
+  }
+  
   digitalWrite(BUZZER_PIN, LOW);
 }
 
@@ -406,6 +379,9 @@ void wakeUp(){
 
   isSleep = false;
   while(mySerial.available()) mySerial.read();
+  
+  wakeupSensor();
+  
   lastActivity = millis();
 }
 
@@ -543,6 +519,10 @@ void handleSetWifi(){
   
   if(ssid.length() > 0){
     saveWifiCredentials(ssid, pass);
+    
+    // Set flag agar setelah restart WiFi menyala otomatis
+    prefs.putBool("wifi_auto_on", true);
+    
     server.send(200,"text/plain","OK");
     delay(1000);
     ESP.restart();
@@ -551,12 +531,27 @@ void handleSetWifi(){
   }
 }
 
+void handleWifiOff(){
+  if(!wifiEnabled){
+    server.send(200,"text/plain","Already OFF");
+    return;
+  }
+  
+  // Matikan WiFi
+  wifiEnabled = false;
+  server.stop();
+  WiFi.softAPdisconnect(true);
+  WiFi.mode(WIFI_OFF);
+  
+  server.send(200,"text/plain","OK");
+}
+
 // ================= SETUP =================
 void setup(){
   pinMode(BUZZER_PIN, OUTPUT);
   pinMode(RELAY_PIN, OUTPUT);
   pinMode(TOUCH_PIN, INPUT);
-  pinMode(RESET_WIFI_PIN, INPUT_PULLUP);
+  pinMode(WIFI_TOGGLE_PIN, INPUT_PULLUP);
 
   prefs.begin("fingerDB", false);
   loadNames();
@@ -568,15 +563,23 @@ void setup(){
   
   finger.verifyPassword();
 
-  setupWiFi();
+  // KONTROL WIFI BERDASARKAN FLAG
+  if(wifiAutoOnAfterRestart){
+    // Restart karena ganti WiFi dari web -> WiFi menyala
+    wifiEnabled = true;
+    setupWiFi();
+    server.begin();
+    
+    // Hapus flag setelah digunakan
+    prefs.putBool("wifi_auto_on", false);
+    wifiAutoOnAfterRestart = false;
+  } else {
+    // Default: WiFi MATI
+    wifiEnabled = false;
+    WiFi.mode(WIFI_OFF);
+  }
   
-  // Indikasi setup selesai dengan beep
-  beep(100);
-  delay(100);
-  beep(100);
-  
-  bootTime = millis();
-
+  // Setup web server routes (tetap di-set meskipun wifiEnabled false)
   server.on("/",handleRoot);
   server.on("/relay",handleRelay);
   server.on("/status",handleStatus);
@@ -588,19 +591,22 @@ void setup(){
   server.on("/setname",handleSetName);
   server.on("/getWifi",handleGetWifi);
   server.on("/setWifi",handleSetWifi);
-
-  server.begin();
-
+  server.on("/wifi/off", handleWifiOff);
+  
+  // Indikasi setup selesai dengan beep
+  beep(100);
+  delay(100);
+  beep(100);
+  
   lastActivity = millis();
 }
 
 // ================= LOOP =================
 void loop(){
-  cekResetWifiButton();
+  cekWifiToggleButton();
   
   if(wifiEnabled){
     server.handleClient();
-    cekWifiPowerSaving();
   }
 
   handleSleep();
